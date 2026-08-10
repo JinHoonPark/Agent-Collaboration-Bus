@@ -3,52 +3,8 @@
 워크스페이스/머신 경계를 넘어 코딩 에이전트(Claude Code, Codex CLI)가
 서로를 호출하고 상태를 공유하기 위한 최소 프로토콜.
 
-- 버전: v0.2 (v0.1에서 설계 확정)
-- 작성일: 2026-08-10
-- 최종 수정: 2026-08-11 (M0 실측 결과 반영)
-- 상태: **설계 확정 + M0 실측 완료. 미결 없음. M1 착수 가능.**
-  실측 근거는 같은 폴더의 `M0-results.md` 를 참조한다.
-
----
-
-## 0. v0.1 → v0.2 변경 요약
-
-| 영역 | v0.1 | v0.2 |
-|---|---|---|
-| 수신자별 상태 | 메시지에 state 단일 필드 | deliveries 테이블로 수신자별 분리 |
-| acb_wait 기본 타임아웃 | 300초 | **45초 + 반복 폴링** (Codex 기본 툴 타임아웃 60초 대응) |
-| acb_wait 응답 개수 | 미정의 | 브로커가 자동 계산, received/expected 반환 |
-| 취소 | 없음 | type="cancel" 메시지 (별도 툴 아님) |
-| 데드락 | 없음 | 1-hop 상호 대기 검사 + 대시보드 대기 그래프 |
-| wake resume 모드 | claude -p --resume | **spawn 으로 개명** (헤드리스 신규 프로세스) |
-| wake 신규 | — | app_server (Codex), notify (OS 알림) |
-| 클라이언트 종류 | 구분 없음 | client 필드로 waker 분기 |
-| 시각 | 클라이언트가 created_at 전송 | **브로커가 모든 시각을 찍음** |
-| 프롬프트 인젝션 | 언급 없음 | 3중 방어 (툴 description / register 응답 / inbox 래핑) |
-| 아티팩트 | M4, 범용 파일 저장소 | M4, **커밋 전 초안 계약 공유로 범위 축소** |
-| 락 | M5 | **M5 이후 또는 폐기.** heartbeat + 대시보드로 대체 |
-| 대시보드 | 없음 | **M1 필수** |
-| 레이트 리밋 | 언급만 | 구체값 확정 |
-
-### 0.1 M0 실측 반영 (2026-08-11)
-
-실측 6건을 마치고 아래를 수정했다. **4장 스키마와 6장 툴 시그니처는 변경 없다.**
-근거와 관찰 원문은 전부 `M0-results.md` 에 있다.
-
-| 수정 위치 | 내용 | 근거 |
-|---|---|---|
-| 7.2 | `app_server` 를 **v1 구현 제외**로 이동. 열거에는 "검증된 미래 옵션"으로 유지 | M0-6 |
-| 7.2 | `notify` 모드의 권장 구현을 **MCP elicitation 기반**으로 변경 | M0-3 |
-| 7.3 | 등록 예시에서 Codex 기본을 `hook` 으로 변경 | M0-6 |
-| 9 | 훅 등록 위치·형식과 Codex 2단계 승인 절차를 신규 항목으로 추가 | M0-6 |
-| 10.3 | Codex 훅 신뢰 해시의 범위 한계를 신규 항목으로 추가 | M0-6 |
-| 13 | M3 waker 범위에서 `app_server` 제외 | M0-6 |
-| 14 | 실측 항목 표를 결과표로 교체 | 전체 |
-
-**핵심 결론 하나:** Claude Code 와 Codex CLI 가 **훅만으로 동일하게 동작한다**는 것이
-실측으로 확인됐다(양쪽 모두 PostToolUse 주입과 Stop 훅 턴 연장 성공). 따라서 Codex 전용
-`app_server` 경로를 v1 에 넣을 이유가 없어졌다. `wake_mode` 는 열거형이므로 나중에
-추가해도 기존 구현을 뒤엎지 않는다.
+- 버전: v0.2
+- 최종 수정: 2026-08-11
 
 ---
 
@@ -114,6 +70,12 @@ role:<name>                 역할 기반 라우팅 (예: role:backend)
 
 ## 4. 데이터 스키마
 
+**시각 표현.** 모든 시각은 브로커가 찍는다. DB 에는 unix milliseconds 정수로 저장하고,
+API 경계에서 ISO-8601 UTC 문자열로 직렬화한다. `broker_time`, `created_at`,
+`last_seen`, `updated_at` 이 모두 동일한 규칙을 따른다. 정수로 저장하는 이유는 90초
+stale 판정과 `ttl_sec` 만료 계산이 정수 연산이기 때문이고, ISO 로 내보내는 이유는
+모델이 오해 없이 읽기 때문이다.
+
 ### 4.1 instances — 세션 하나 = 행 하나
 
 ```sql
@@ -127,7 +89,8 @@ CREATE TABLE instances (
   repo          TEXT,
   wake_mode     TEXT NOT NULL,      -- wait | hook | app_server | spawn | notify
   wake_config   TEXT,               -- JSON (endpoint, thread_id, cmd 등)
-  session_token TEXT NOT NULL,      -- 이후 모든 호출에서 from 강제 (스푸핑 차단)
+  session_token TEXT NOT NULL,      -- 재접속 시 주소 재확보용 (6.1 세션 바인딩)
+  mcp_session   TEXT,               -- 바인딩된 Mcp-Session-Id. from 은 여기서 해석
   status        TEXT NOT NULL,      -- idle | working | blocked | offline | evicted
   current_task  TEXT,
   registered_at INTEGER NOT NULL,   -- 브로커 시각, unix ms
@@ -187,6 +150,27 @@ CREATE TABLE waiters (
   expires_at  INTEGER NOT NULL
 );
 ```
+
+### 4.5 artifacts — 메타데이터만. 본문은 파일시스템
+
+```sql
+CREATE TABLE artifacts (
+  key          TEXT NOT NULL,
+  rev          INTEGER NOT NULL,     -- key 별 1부터 단조 증가
+  sha256       TEXT NOT NULL,        -- 블롭 파일명. 본문은 8장의 artifacts/ 아래
+  content_type TEXT,
+  size_bytes   INTEGER NOT NULL,
+  note         TEXT,
+  updated_by   TEXT NOT NULL,        -- 주소
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY (key, rev)
+);
+```
+
+- 본문을 DB 에 넣지 않는다. 최대 5MB 블롭을 SQLite 행에 담을 이유가 없다.
+- `rev="latest"` 는 해당 key 의 `MAX(rev)` 다.
+- **동일 내용 재업로드는 새 rev 를 만들지 않는다.** `sha256` 이 최신 rev 와 같으면
+  기존 rev 를 그대로 반환한다. 같은 파일을 반복 put 할 때 rev 가 부풀지 않게 한다.
 
 ---
 
@@ -256,10 +240,11 @@ dropped   (수신자 미등록 — 배달 시도 자체가 없었음. 종단 상
 
 ```
 acb_register(
-  agent_id, host, workspace,
+  host, workspace,
   client,                      # "claude-code" | "codex"   [필수]
-  roles?, repo?, capabilities?,
+  roles?, repo?,
   wake?,                       # { mode, ...config }
+  session_token?,              # 재접속 시 주소 재확보 (아래 "세션 바인딩")
   force = false                # stale 아니어도 강제 인수
 )
   -> { address, instance_id, session_token, broker_time,
@@ -269,12 +254,33 @@ acb_register(
        hint: "해당 워크스페이스에 이미 세션이 열려 있습니다. 기존 세션을 쓰거나 닫으세요." }
 ```
 
+**세션 바인딩 — `from` 을 어떻게 강제하는가**
+
+`acb_register` 는 인스턴스를 **MCP 세션(`Mcp-Session-Id`)에 바인딩한다.** 이후 모든
+툴 호출에서 브로커는 세션으로부터 발신 인스턴스를 해석한다. **`session_token` 을 툴
+인자로 받지 않는다.**
+
+- 툴 9개 전부에 토큰 인자를 다는 방식을 쓰지 않는 이유: 모델이 매 호출마다 토큰을
+  정확히 넘기는 것은 확률적이라 보장되지 않고, 토큰이 대화 트랜스크립트와 감사
+  로그에 반복 노출된다.
+- 바인딩 없는 세션에서 다른 툴을 호출하면
+  `{ error: "not_registered", hint: "acb_register 를 먼저 호출하세요." }` 를 반환한다.
+- **`session_token` 의 용도는 재확보다.** 네트워크 끊김이나 브로커 재시작으로 MCP
+  세션이 새로 열리면 바인딩이 사라진다. 이때 토큰을 제시하면 아래 규칙 3 의
+  `workspace_occupied` 검사를 건너뛰고 같은 `instance_id` 를 새 세션에 재바인딩한다.
+
+> **전제 확인 필요 (M1 최우선).** 이 설계는 `Mcp-Session-Id` 가 한 세션의 여러 툴
+> 호출에 걸쳐 안정적으로 유지된다는 전제 위에 있다. Streamable HTTP 에서 확인되지
+> 않으면 **모든 툴이 `session_token` 을 인자로 받는 방식으로 폴백하고, 6장 시그니처를
+> 전부 수정한다.** 구현 착수 첫 작업으로 확인한다.
+
 **Stale 인수(takeover) 규칙**
 
 1. 동일 (host, workspace)에 인스턴스가 없으면 -> 정상 등록
 2. 있고 last_seen 이 90초를 넘겼으면 -> 자동 인수. 이전 인스턴스는 evicted
 3. 있고 90초 이내면 -> workspace_occupied 에러
-4. force=true -> 2·3 무시하고 즉시 인수 (크래시 후 재시작용)
+4. force=true -> 2·3 무시하고 즉시 인수. 토큰을 잃은 신규 프로세스(spawn 등) 전용이다.
+   토큰을 갖고 있으면 `session_token` 재확보가 우선이다
 5. evicted 된 인스턴스가 이후 heartbeat/send를 보내면 `{error: "evicted"}` 반환.
    해당 세션은 ACB 사용을 멈추고 사용자에게 안내한다.
 
@@ -403,18 +409,18 @@ advisory 락(acb_claim / acb_release / acb_extend)은 **M5 이후 또는 폐기.
 
 ### 7.2 클라이언트 종류별 waker
 
-**두 클라이언트는 훅만으로 동일하게 동작한다 (M0 실측 확인).**
-괄호 안은 M0 에서 측정한 배달 지연이다.
+**두 클라이언트는 훅만으로 동일하게 동작한다.**
 
 | 상황 | Claude Code | Codex CLI |
 |---|---|---|
 | acb_wait 중 | 즉시 해제 | 즉시 해제 |
-| 작업 중 | PostToolUse 훅으로 inbox 주입 (21초) | PostToolUse 훅으로 inbox 주입 (8초) |
-| 턴 종료 직전 | Stop 훅 decision="block" 으로 턴 연장 (97초) | Stop 훅 decision="block" 으로 턴 연장 (9초) |
+| 작업 중 | PostToolUse 훅으로 inbox 주입 | PostToolUse 훅으로 inbox 주입 |
+| 턴 종료 직전 | Stop 훅 decision="block" 으로 턴 연장 | Stop 훅 decision="block" 으로 턴 연장 |
 | **완전 idle** | **spawn 또는 notify** | **spawn 또는 notify** (app_server 는 v1 제외) |
 
-지연은 고정값이 아니다. PostToolUse 는 "다음 툴 호출까지의 간격", Stop 은 "진행 중인
-작업의 남은 길이"가 실체다. 위 수치는 M0 시나리오에서의 관측치일 뿐이다.
+**배달 지연은 사양이 아니다.** PostToolUse 의 실체는 "다음 툴 호출까지의 간격",
+Stop 의 실체는 "진행 중인 작업의 남은 길이"다. 어느 쪽도 브로커가 통제할 수 없으므로
+지연 상한을 약속하지 않는다.
 
 wake_mode 열거:
 
@@ -427,15 +433,15 @@ wake_mode 열거:
 | none | O | 알림도 불가 | inbox에만 적재 |
 | app_server | **X (v1 제외)** | Codex + App Server 모드로 기동됨 | turn/start 로 idle 스레드에 턴 시작 |
 
-**`app_server` 를 v1 에서 제외하는 근거 (M0-4, M0-6):**
+**`app_server` 를 v1 에서 제외하는 근거:**
 
-기능 자체는 완전히 동작한다. M0-4 에서 외부 `turn/start` 가 사람이 보는 TUI 에
-사용자 입력과 동일하게 렌더링되고 모델이 응답하는 것을 확인했다(지연 사실상 0).
-제외하는 이유는 동작 여부가 아니라 **비용 대비 고유 가치**다.
+기능 자체는 동작이 확인됐다. 외부 `turn/start` 는 사람이 보는 TUI 에 사용자 입력과
+동일하게 렌더링되고 모델이 응답한다. 제외하는 이유는 동작 여부가 아니라
+**비용 대비 고유 가치**다.
 
 - 고유 가치는 **Codex 쪽 idle wake 하나뿐**이고, idle wake 는 1장의 v1 비목표다.
-- M0-6 에서 Codex 도 훅만으로 Claude 와 동일하게 동작함이 확인돼, 나머지 상황은
-  `hook` 이 모두 처리한다.
+- Codex 도 훅만으로 Claude 와 동일하게 동작하므로 나머지 상황은 `hook` 이 모두
+  처리한다.
 - 비용: Windows 에서 `codex app-server daemon` 미지원, unix 소켓 경로 SUN_LEN(약 108자)
   제한, WebSocket 전송이 공식 experimental, 사용자가 평범한 `codex` 가 아니라
   `codex app-server --listen` + `codex --remote` 2단계로 기동해야 함, 브로커에
@@ -446,11 +452,11 @@ wake_mode 열거:
 
 `wake_mode` 는 열거형이므로 나중에 추가해도 additive 다. 필요해지면 그때 넣는다.
 
-**notify 구현 — MCP elicitation 우선 (M0-3):**
+**notify 구현 — MCP elicitation 우선:**
 
 `notify` 의 기본 구현은 OS 알림이 아니라 **MCP elicitation** 으로 한다.
-M0-3 에서 Claude Code 가 `elicitation` 을 광고하고 실제로 지원함을 확인했으며,
-**툴 호출이 없는 완전 idle 상태에서도 서버가 보낸 요청이 화면에 렌더링됐다.**
+Claude Code 는 `elicitation` 을 광고하고 실제로 지원하며, **툴 호출이 없는 완전 idle
+상태에서도 서버가 보낸 요청이 화면에 렌더링된다.**
 
 | 항목 | OS 알림 방식 | elicitation 방식 |
 |---|---|---|
@@ -458,8 +464,8 @@ M0-3 에서 Claude Code 가 `elicitation` 을 광고하고 실제로 지원함�
 | 사용자 동작 | 세션으로 가서 직접 타이핑 | Accept / Decline + 구조화된 값 입력 |
 | 브로커 회신 | 없음 | `{"action":"accept","content":{...}}` 즉시 회신 |
 
-**두 클라이언트 모두 지원한다 (M0-3 실측).** Codex 도 idle 상태에서 폼 UI 를 렌더링하고
-`{"action":"accept","content":{…}}` 를 회신했다. 오히려 Codex 쪽 UI 가 더 낫다 —
+**두 클라이언트 모두 지원한다.** Codex 도 idle 상태에서 폼 UI 를 렌더링하고
+`{"action":"accept","content":{…}}` 를 회신한다. 오히려 Codex 쪽 UI 가 더 낫다 —
 `requestedSchema` 의 필드명과 description 을 폼으로 표현한다.
 
 | | Claude Code | Codex CLI |
@@ -474,19 +480,18 @@ Codex 는 `mcp_elicitations` 를 `sandbox_approval`, `skill_approval` 과 같은
 즉시 거부된다. 에러도 경고도 없고, 브로커는 정상적인 `{"action":"decline"}` 을 받는다.
 **"사용자가 거부했다"와 "사용자가 보지도 못했다"가 같은 응답이다.**
 
-구현 규칙: **응답 지연으로 판별한다.** 실측상 자동 거부는 2~3ms, 사람 응답은 61초 이상
-(Claude 는 2분 49초)이었다. 브로커는 **수십 ms 안에 오는 `decline` 을 "자동 거부 의심"으로
-분류하고 OS 알림으로 폴백한다.** 임계값은 M3 에서 정한다.
+구현 규칙: **응답 지연으로 판별한다.** 자동 거부는 수 ms 안에 돌아오고 사람 응답은
+최소 수십 초가 걸린다. 브로커는 **수십 ms 안에 오는 `decline` 을 "자동 거부 의심"으로
+분류하고 OS 알림으로 폴백한다.** 정확한 임계값은 M3 에서 정한다.
 
 **elicitation 은 사람을 깨우지 에이전트를 깨우지 않는다.** 응답은 브로커에게만 돌아가고
-모델 컨텍스트로는 들어가지 않는다. 양쪽 클라이언트 모두 제출 직후 세션이 조용했고
-후속 메시지가 하나도 없었다(원문 로그 확인). 따라서 이것은 `notify` 의 개선이지
-idle wake 의 해법이 아니다.
+모델 컨텍스트로는 들어가지 않는다. 양쪽 클라이언트 모두 제출 직후 세션이 조용하고
+후속 메시지가 없다. 따라서 이것은 `notify` 의 개선이지 idle wake 의 해법이 아니다.
 
-**남은 미확인 사항 하나:** M0-3 은 stdio 전송에서 측정했고 ACB 는 9장대로 Streamable HTTP
-를 쓴다. **M1 에서 브로커를 세울 때 확인하고, 안 되면 OS 알림으로 폴백한다.**
-`sampling` 은 두 클라이언트 모두 지원하지 않으므로(Claude 는 `-32601`, Codex 는 미광고)
-설계에 넣지 않는다.
+> **전제 확인 필요 (M1).** 위 동작은 stdio 전송에서 확인된 것이고 ACB 는 9장대로
+> Streamable HTTP 를 쓴다. 브로커를 세울 때 확인하고, 안 되면 OS 알림으로 폴백한다.
+
+`sampling` 은 두 클라이언트 모두 지원하지 않으므로 설계에 넣지 않는다.
 
 **spawn 이 v0.1의 resume 을 대체한다.** `claude -p --resume <id>` 는 사용자가
 보고 있는 포그라운드 세션이 아니라 별개 프로세스이고, 같은 트랜스크립트를
@@ -603,7 +608,7 @@ CLI로 추가:
 codex mcp add acb --url http://10.0.0.11:7777/mcp --bearer-token-env-var ACB_TOKEN
 ```
 
-### 훅 등록 (wake_mode = hook 을 쓰는 경우, M0 실측 기준)
+### 훅 등록 (wake_mode = hook 을 쓰는 경우)
 
 훅 설정 형식은 두 클라이언트가 사실상 동일하다. 이벤트 이름은 PascalCase 이고,
 `{ matcher, hooks: [{ type, command, timeout }] }` 구조를 그대로 쓴다.
@@ -625,7 +630,7 @@ codex mcp add acb --url http://10.0.0.11:7777/mcp --bearer-token-env-var ACB_TOK
 } }
 ```
 
-**Codex 는 2단계 승인이 필요하다 (M0-6 실측):**
+**Codex 는 2단계 승인이 필요하다:**
 
 1. **프로젝트 신뢰.** 신뢰되지 않은 프로젝트의 `.codex/hooks.json` 은 **오류도 없이
    0건으로 조용히 무시된다.** `config.toml` 의
@@ -636,10 +641,38 @@ codex mcp add acb --url http://10.0.0.11:7777/mcp --bearer-token-env-var ACB_TOK
    해시 범위와 그 보안 함의는 10.3 참조.
 
 `<repo>/hooks.json`, `<repo>/.agents/hooks.json`, `<repo>/.codex/hooks/hooks.json` 은
-인식되지 않는다(후보 4곳 동시 배치로 확인).
+인식되지 않는다.
 
 Codex 는 `codex app-server` 의 `hooks/list` 메서드로 훅 설정 파싱 결과를 기계적으로
 검증할 수 있다. 설치 스크립트의 자체 점검에 쓸 수 있다.
+
+### 9.1 플러그인 패키징 — 배포 형태
+
+플러그인은 위의 수동 설정 3종(MCP 서버 등록, 훅 스크립트와 훅 설정, 운용 규칙)을
+설치 명령 하나로 묶는다. **이 리포지토리가 브로커 소스이자 마켓플레이스를 겸한다.**
+
+```
+.claude-plugin/marketplace.json     마켓플레이스 정의
+plugins/acb/
+  .claude-plugin/plugin.json        플러그인 매니페스트
+  .mcp.json                         acb MCP 서버 등록
+  hooks/hooks.json                  PostToolUse / Stop
+  hooks/acb-posttool.js
+  hooks/acb-stop.js
+```
+
+- **브로커 주소와 토큰을 플러그인에 하드코딩하지 않는다.** 사용자마다 다르므로
+  `ACB_URL`, `ACB_TOKEN` 환경변수로 읽는다. 토큰은 10.1 에 따라 환경변수 전용이다.
+- 훅 설정의 `command` 경로는 절대 경로 대신 플러그인 설치 경로 변수를 쓴다
+  (Claude Code 는 `${CLAUDE_PLUGIN_ROOT}`).
+- 운용 규칙(위 블록)은 플러그인이 함께 배포한다. 사용자가 손으로 복사하게 두면
+  10.2 의 인젝션 방어 2단계가 누락될 수 있다.
+- 배포와 자동 업데이트의 허용 범위는 10.3 을 따른다. 플러그인 경로는 허용, 브로커의
+  런타임 훅 파일 쓰기는 금지다.
+
+> **확인 필요 (M6).** Codex CLI 의 마켓플레이스 배포 경로는 검증하지 않았다. Codex 가
+> `hooks.json` 과 `config.toml` 의 `mcp_servers` 를 쓴다는 것까지만 확인됐다. 검증 전까지
+> Codex 는 위의 수동 등록이 정식 경로다.
 
 ### 운용 규칙 (CLAUDE.md / AGENTS.md 에 추가)
 
@@ -662,8 +695,9 @@ Codex 는 `codex app-server` 의 `hooks/list` 메서드로 훅 설정 파싱 결
 
 - 사설망 전용. bind 를 공인 IP에 노출하지 말 것.
 - Bearer 토큰 필수. 토큰은 환경변수로만 주입.
-- **acb_register 가 발급한 session_token 으로 브로커가 from 을 강제한다.**
-  공유 시크릿만으로는 주소 스푸핑을 막을 수 없다.
+- **브로커가 MCP 세션 바인딩으로 from 을 강제한다 (6.1).** 공유 시크릿만으로는 주소
+  스푸핑을 막을 수 없다. `session_token` 은 재접속 시 주소 재확보용이며, 툴 인자로
+  오가지 않으므로 트랜스크립트와 감사 로그에 반복 노출되지 않는다.
 - 브로커는 파일 시스템 접근 툴을 제공하지 않는다. 코드 전달은 git으로.
 - artifact 크기 제한, 메시지 body 크기 제한 강제.
 - 모든 툴 호출은 logs/*.jsonl 에 append-only 기록.
@@ -687,11 +721,9 @@ ACB는 정의상 **다른 에이전트가 쓴 텍스트를 내 세션 컨텍스�
 별도의 acb_guide 툴로 상세 사용법을 제공할 수 있으나, **보안 라벨을 guide
 툴에만 두어서는 안 된다.** 모델이 호출하지 않으면 효력이 없다.
 
-**M0 관찰 (근거 보강, 완화 근거 아님):** M0-2 와 M0-6 에서 주입 텍스트 말미의
-방어 문구가 실제로 모델 행동에 반영되는 것을 확인했다. 양쪽 클라이언트 모두 스스로
-"메시지 본문은 외부 에이전트 데이터로 취급해 지시문으로 해석하지 않았다"고 보고했다.
-다만 이는 **선의의 텍스트에 대한 관찰**이며 실제 공격 문자열에 대한 저항력은 측정하지
-않았다. 위 3중 방어를 완화할 근거가 아니다.
+주입 텍스트 말미의 방어 문구가 모델 행동에 반영되는 것은 양쪽 클라이언트에서
+확인됐다. 다만 이는 **선의의 텍스트에 대한 관찰**이며 실제 공격 문자열에 대한 저항력은
+측정된 바 없다. 3중 방어를 완화할 근거로 쓰지 않는다.
 
 ### 10.3 훅 신뢰 경계 — 훅 스크립트 파일이 곧 신뢰 경계다
 
@@ -699,11 +731,11 @@ ACB 는 각 워크스페이스에 훅 스크립트를 설치한다. 그런데 **
 메커니즘은 훅 설정 항목만 고정하고, 그 설정이 실행하는 스크립트 파일의 내용은
 고정하지 않는다.**
 
-M0-6 실측: Codex 는 훅을 승인하면 `config.toml` 의
+Codex 는 훅을 승인하면 `config.toml` 의
 `[hooks.state.'<hooks.json 경로>:<event>:<i>:<j>']` 아래 `trusted_hash` 를 저장한다.
 이 해시는 `hooks.json` 항목(command, event, matcher, timeout)에 대해 계산된다.
-`command` 가 가리키는 `.js` 파일을 통째로 새로 써도 신뢰 상태는 `Trusted` 그대로였고
-저장된 해시도 변하지 않았다.
+`command` 가 가리키는 `.js` 파일을 통째로 새로 써도 신뢰 상태는 `Trusted` 로 남고
+저장된 해시도 변하지 않는다.
 
 - **운용상 이점:** ACB 훅 스크립트의 로직을 업데이트해도 사용자 재승인이 필요 없다.
   얇은 런처로 감싸는 우회 구조가 불필요하다.
@@ -726,7 +758,7 @@ M0-6 실측: Codex 는 훅을 승인하면 `config.toml` 의
   규칙을 그대로 따른다.
 - 훅 스크립트는 워크스페이스 내부 또는 플러그인 설치 경로에 두고, 다른 참여자가
   쓰기 가능한 공유 위치에 두지 않는다.
-- **클라이언트의 훅 승인 UI 는 스크립트 파일 내용을 검증하지 않는다(위 M0-6 실측).**
+- **클라이언트의 훅 승인 UI 는 스크립트 파일 내용을 검증하지 않는다(위 문단).**
   따라서 신뢰의 기준점은 승인 UI 가 아니라 배포 채널이다.
 
 Claude Code 의 훅 신뢰 방식은 별도로 확인하지 않았다. 위 결론은 Codex 실측에
@@ -767,80 +799,19 @@ Claude Code 의 훅 신뢰 방식은 별도로 확인하지 않았다. 위 결�
 
 | 단계 | 범위 | 예상 규모 |
 |---|---|---|
-| **M0** | **실측만 완료 (2026-08-11).** 14장 참조. 원래 범위였던 "공유 폴더 메일박스로 워크스페이스 2개 왕복"은 **미실시 — M1 에 흡수** | 실측 6건 |
 | **M1** | FastMCP HTTP 브로커 + SQLite + register/send/inbox/reply + **대시보드** | ~800 LOC |
 | **M2** | acb_wait (45초 폴링 + resume_token) + 상호 대기 검사 + cancel + 레이트 리밋 | ~350 LOC |
 | **M3** | Waker: hook / spawn / notify. **app_server 는 v1 제외** (7.2 참조) | ~350 LOC |
 | **M4** | 아티팩트 (커밋 전 초안 계약 한정) | ~300 LOC |
 | **M5** | 락 — 또는 폐기 | ~250 LOC |
+| **M6** | 플러그인 패키징과 마켓플레이스 배포 (9.1). 훅 스크립트를 포함하므로 M3 이후 | ~150 LOC |
 
 **LOC = Lines of Code (코드 줄 수).** 위 수치는 정상 경로 기준이다.
 재연결·타임아웃·에러 처리·정리 잡을 포함하면 총 3,000~4,000 LOC 규모로 보는
 것이 현실적이다.
 
-**M0을 스펙 확정보다 먼저 두는 이유:** 이 프로젝트의 성패는 코드량이 아니라
-"훅으로 주입한 메시지가 실제로 모델의 행동을 바꾸는가"라는 확률적 특성에
-달려 있다. 이것이 안 되면 나머지 전부가 무의미하므로 가장 먼저 검증한다.
-
-**M1 의 작업 순서 — 왕복 1회를 가장 먼저 통과시킨다.**
-
-M0 에서 실측한 것은 전부 "외부 스크립트 -> 훅 -> 에이전트 세션 1개" 구조였다.
-**에이전트 두 개가 요청·응답을 완주한 적은 아직 없다.** M0 의 원래 범위였던 왕복 POC 를
-건너뛰었기 때문에 그 위험이 M1 으로 넘어왔다.
-
-남은 위험은 배관 코드가 아니라 **모델 행동**이다. 수신 에이전트가 메시지를 처리하고도
-`acb_reply` 를 호출하지 않고 자기 사용자에게 보고만 하고 끝낼 수 있다. 이는 확률적이라
-코드로 보장되지 않으며, 실제로 돌려봐야만 안다.
-
-따라서 M1 은 "브로커를 다 만들고 마지막에 테스트"가 아니라, **`acb_register` /
-`acb_send` / `acb_inbox` / `acb_reply` 최소 경로로 A -> B -> A 왕복 1회를 먼저 통과시키고**
-그 위에 나머지(대시보드, 에러 처리, 정리 잡)를 얹는 순서로 진행한다.
-800 LOC 를 다 쓴 뒤에 행동 문제가 드러나면 되돌리는 비용이 크다.
-
----
-
-## 14. M0 실측 결과 (완료)
-
-**2026-08-11 종료. 설계상 미결 없음.** 관찰 원문·타임스탬프·재현 절차는 전부
-같은 폴더의 `M0-results.md` 에 있다. 아래는 요약이다.
-
-| # | 대상 | 확인한 것 | 결과 |
-|---|---|---|---|
-| 1 | Claude Code | Stop 훅 `decision:"block"` 턴 연장 | **PASS.** 배달 지연 97초 |
-| 2 | Claude Code | PostToolUse `additionalContext` 컨텍스트 진입 | **PASS.** 배달 지연 21초 |
-| 3 | 양쪽 | MCP sampling / elicitation 지원 | sampling **양쪽 미지원** / elicitation **양쪽 지원**(idle 포함). Codex 는 `approval_policy ≠ "never"` 필요 |
-| 4 | Codex | App Server `turn/start` 의 TUI 렌더링 | **PASS.** 사용자 입력과 동일하게 렌더링, 지연 사실상 0 |
-| 5 | Codex | WebSocket 없이 로컬 App Server 접속 | 부분 확인. `unix://` 리스너는 Windows 에서 기동됨 |
-| 6 | Codex | **(신규)** 훅이 모델 컨텍스트에 주입 가능한가 | **PASS.** PostToolUse 8초 / Stop 9초 |
-
-6번은 원래 없던 항목이다. 2번을 마친 뒤 "Claude 는 훅만으로 되는데 Codex 도 훅만으로
-맞추면 설계가 대칭이 되지 않나"라는 검토에서 도출됐고, `app_server` 의 v1 포함 여부가
-여기에 달려 있었다.
-
-**전제 확인:** 이 프로젝트의 성패가 걸려 있던 1번이 통과했다. 훅으로 주입한 텍스트가
-확률적 시스템인 모델의 행동을 실제로 바꾼다. 워크스페이스 밖에 둔 난수 토큰을 모델이
-정확히 산출하는 방식으로 기계적으로 증명했다.
-
-**전제 유지:** 3번에서 elicitation 이 idle 세션에서도 화면에 렌더링되는 것을 확인했으나,
-응답은 브로커에게만 돌아가고 모델 컨텍스트로는 들어가지 않는다. **1장의 "완전 자동화는
-비목표" 전제는 그대로 유지된다.**
-
-### 남은 미검증 사항 (M1 에서 확인)
-
-M0 는 닫혔지만 다음은 구현 중에 확인해야 한다. 앞의 세 항목은 **M0 의 원래 범위였던
-왕복 POC 를 건너뛰면서 M1 으로 넘어온 것**이고, 나머지는 처음부터 M0 범위 밖이었다.
-
-| 항목 | 왜 미검증인가 | 확인 시점 |
-|---|---|---|
-| **에이전트 간 왕복 전체** | M0 는 "외부 스크립트 -> 훅 -> 에이전트 1개" 구조로만 측정했다. **에이전트 두 개가 요청·응답을 완주한 적이 없다** | **M1 최우선** |
-| 수신 에이전트가 실제로 `acb_reply` 를 호출하는가 | 메시지를 처리하고도 자기 사용자에게 보고만 하고 끝낼 수 있다. 확률적 행동이라 코드로 보장되지 않는다 | M1 왕복 테스트 |
-| `acb_wait` 반복 폴링을 모델이 견디는가 | 45초 블로킹 툴을 반복 호출하는 동안 포기하거나 다른 작업으로 새지 않는지 확인하지 않았다 | M2 |
-| 훅 주입 지시를 **MCP 툴 호출**로 일반화 | M0 는 파일 읽기/쓰기 지시로 측정했다. 실제 ACB 는 `acb_inbox` 호출을 지시한다 | M1 통합 테스트 |
-| **Streamable HTTP** 전송에서의 elicitation | M0-3 은 stdio 로 측정했다. 9장의 ACB 는 Streamable HTTP 를 쓴다 | M1 브로커 기동 시 |
-| 툴 호출 **진행 중**의 elicitation | M0-3 은 전부 idle 상태로만 측정했다. 바이너리에 `guardian MCP elicitation metadata must include a non-empty tool_name` 문자열이 있어 Guardian 경로에서는 툴 연결을 요구하는 것으로 보이나 동작은 확인하지 않았다 | M3 notify 구현 시 |
-| 자동 거부 판별 임계값 | 실측은 자동 2~3ms / 사람 61초 이상. 그 사이 어디에 선을 그을지는 정하지 않았다 | M3 |
-| HTTP 전송에서 "세션 1개 = 연결 1개" | stdio 에서는 클라이언트마다 서버 프로세스가 따로 뜬다(실측에서 접속 3건 관측). HTTP 는 구조가 다르다 | M1 |
-| 다건 동시 배달, `additionalContext` 2,500 토큰 초과 시 축약 동작 | 단건으로만 측정했다 | M2 |
+각 단계의 착수 순서와 미검증 항목은 계획 문서가 다룬다. 이 스펙은 무엇을 만들지만
+정의한다.
 
 ---
 
