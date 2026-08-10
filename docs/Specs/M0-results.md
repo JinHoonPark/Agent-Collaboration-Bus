@@ -43,7 +43,7 @@
 
 - 2026-08-10, Windows 11 Home 10.0.26200
 - Node.js v25.8.1
-- 테스트 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\M0\stop-hook-test\`
+- 테스트 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\tests\stop-hook-test\`
 - 테스트 세션 ID: `0f95b824-f1d2-4926-86aa-6f618f261f16` (R1~R3 동일 세션)
 
 ### 검증 방법
@@ -149,7 +149,7 @@ M0-2(PostToolUse `additionalContext`)의 가치가 이번 측정으로 구체화
 
 ### 재현 방법
 
-`D:\Projects\Utils\Agent-Collaboration-Bus\M0\stop-hook-test\README.md` 참조.
+`D:\Projects\Utils\Agent-Collaboration-Bus\tests\stop-hook-test\README.md` 참조.
 훅 로그 원본은 같은 디렉터리의 `.acb-test\hook.log` 및 `.acb-test\hook.log.*.bak` 에 있다.
 
 ---
@@ -237,7 +237,7 @@ ACB 의 실시간 협업(v1 범위의 핵심)은 성립한다.
 
 ### 재현 방법
 
-`M0\stop-hook-test\.acb-test\` 의 `m2-seed.js`(토큰 심기),
+`tests\stop-hook-test\.acb-test\` 의 `m2-seed.js`(토큰 심기),
 `posttool-hook.js`(훅 본체), `m2-check.js`(판정) 참조.
 훅 호출 로그는 같은 디렉터리 `posttool.log` 에 있다.
 토큰 state 파일은 스크래치패드에 있으며 세션 종료 시 사라질 수 있다.
@@ -250,7 +250,7 @@ ACB 의 실시간 협업(v1 범위의 핵심)은 성립한다.
 
 - 2026-08-10 (로그 시각은 UTC), Windows 11 Home 10.0.26200
 - codex-cli 0.147.0, Node.js v25.8.1
-- 검증 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\M0\codex-appserver-test\`
+- 검증 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\tests\codex-appserver-test\`
 - App Server: `codex app-server --listen ws://127.0.0.1:17777`
 - TUI: `codex --remote ws://127.0.0.1:17777` (사용자가 별도 터미널에서 기동, idle 대기)
 - 외부 클라이언트: `m4-client.js` (Node 내장 WebSocket 사용, 의존성 없음)
@@ -341,7 +341,7 @@ M0-2 직후, "Claude Code 는 훅만으로 실시간 배달이 되는데 Codex �
 
 ### 재현 방법
 
-`M0\codex-appserver-test\m4-client.js` 참조.
+`tests\codex-appserver-test\m4-client.js` 참조.
 
 ```
 codex app-server --listen ws://127.0.0.1:17777      # 터미널 1
@@ -388,7 +388,7 @@ Codex 도 훅만으로 맞추면 설계가 대칭이 되어 단순해지지 않�
 ### 검증 일시 / 환경
 
 - 2026-08-10 (로그 시각은 UTC), codex-cli 0.147.0
-- 테스트 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\M0\codex-hook-test\`
+- 테스트 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\tests\codex-hook-test\`
 - Codex 세션 id `019fec43-0104-75a3-9811-fd71227d3068`, 모델 `gpt-5.6-sol`
 - 훅 등록: `<프로젝트>/.codex/hooks.json`
 - 평범한 `codex` TUI 사용 (App Server 아님)
@@ -559,7 +559,7 @@ v1 구현에서 제외한다.** 열거형이므로 나중에 추가해도 additi
 
 - 2026-08-10 (로그 시각은 UTC)
 - Claude Code 2.1.226, MCP 프로토콜 `2025-11-25`
-- 검증 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\M0\mcp-probe-test\`
+- 검증 워크스페이스: `D:\Projects\Utils\Agent-Collaboration-Bus\tests\mcp-probe-test\`
 - 최소 MCP 서버(stdio) `m3-server.js` 를 `.mcp.json` 으로 등록
 
 ### 검증 방법
@@ -742,6 +742,6 @@ ACB 훅과 브로커도 쓰기 실패를 반드시 stderr 등으로 드러내야
 
 ### 재현 방법
 
-`M0\mcp-probe-test\m3-server.js` 와 `.mcp.json` 참조.
+`tests\mcp-probe-test\m3-server.js` 와 `.mcp.json` 참조.
 `IDLE_DELAY_MS`(initialized 후 자발 발신까지의 지연)와 `ELICIT_TIMEOUT_MS` 를 조정할 수 있다.
 서버 로그는 `m3.log`(해석된 이벤트)와 `m3-raw.jsonl`(클라이언트가 보낸 원문)에 남는다.
