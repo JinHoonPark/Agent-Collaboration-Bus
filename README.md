@@ -274,3 +274,4 @@ stateDiagram-v2
 | M3 | Waker: hook, spawn, notify |
 | M4 | 아티팩트 (커밋 전 초안 계약 한정) |
 | M5 | Advisory 락 — 또는 폐기 |
+| M6 | 플러그인 패키징과 마켓플레이스 배포 |
