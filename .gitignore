@@ -1,0 +1,64 @@
+# --- Ephemeral working documents ---------------------------------------------
+# Specs, plans and scratch notes are deleted once the work they describe lands.
+!Docs/
+
+# --- Verification scratch -----------------------------------------------------
+# Hook / MCP probe experiments and their raw output.
+tests/
+
+# --- Secrets ------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+
+# --- ACB runtime data ---------------------------------------------------------
+# Normally lives in ~/.acb, but a local run can drop it in the repo.
+.acb/
+acb.db
+*.db
+*.sqlite
+*.sqlite3
+*-journal
+*-wal
+*-shm
+logs/
+artifacts/
+
+# --- Python (broker) ----------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Node.js (hook scripts, tooling) ------------------------------------------
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# --- Agent client local settings ----------------------------------------------
+.claude/settings.local.json
+.codex/hooks.local.json
+
+# --- Editors and OS -----------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+.DS_Store
+
+# --- Scratch ------------------------------------------------------------------
+tmp/
+scratch/
+*.tmp
+*.bak
